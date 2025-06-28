@@ -1,161 +1,125 @@
-# {{{ imports 
-
+# {{{ imports
 import pandas as pd
 import numpy as np
-
 from langchain.docstore.document import Document
-from langchain.chains import RetrievalQA
-from langchain.text_splitter import CharacterTextSplitter, RecursiveCharacterTextSplitter
-from langchain.llms import OpenAI
-from langchain.vectorstores import FAISS
-from langchain.schema import Document
-from langchain_community.utilities import ApifyWrapper
-from langchain.embeddings import OpenAIEmbeddings
-from langchain_openai import AzureOpenAIEmbeddings, OpenAIEmbeddings
-from langchain.chat_models import AzureChatOpenAI
-from langchain.vectorstores import AzureSearch
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.embeddings import OpenAIEmbeddings
+from langchain_openai import AzureOpenAIEmbeddings, AzureChatOpenAI
+from langchain_community.vectorstores import AzureSearch
 from langchain.chains import ConversationalRetrievalChain
-from langchain.chains.question_answering import load_qa_chain
 from langchain.prompts import PromptTemplate
-
-import matplotlib.pyplot as plt
 
 import os
 import json
-from typing import Iterable
 from dotenv import load_dotenv
 load_dotenv()
-# }}} 
-# {{{ env variables 
+# }}}
 
-APIFY_API_TOKEN = os.getenv('APIFY_API_KEY')
-OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
+# {{{ env variables
 AZURE_OPENAI_API_KEY = os.getenv('AZURE_OPENAI_API_KEY')
-OPENAI_API_VERSION = '2023-05-15'
-AZURE_OPENAI_API_VERSION = '2023-05-15'
 AZURE_OPENAI_ENDPOINT = os.getenv('AZURE_OPENAI_ENDPOINT')
+AZURE_OPENAI_DEPLOYMENT_NAME = os.getenv('AZURE_OPENAI_DEPLOYMENT_NAME')  # gpt35-financial
 AZURE_COGNITIVE_SEARCH_ENDPOINT = os.getenv('AZURE_COGNITIVE_SEARCH_ENDPOINT')
 AZURE_COGNITIVE_SEARCH_API_KEY = os.getenv('AZURE_COGNITIVE_SEARCH_API_KEY')
 AZURE_COGNITIVE_SEARCH_INDEX_NAME = os.getenv('AZURE_COGNITIVE_SEARCH_INDEX_NAME')
-model: str = "text-embedding-ada-002"
-# }}} 
-# {{{ bob website data 
 
-# apify = ApifyWrapper()
-# loader = apify.call_actor(
-#     actor_id='apify/website-content-crawler',
-#     run_input={'startUrls':[{'url': 'https://www.bankofbaroda.in/'}]},
-#     dataset_mapping_function=lambda item: Document(page_content=item["text"] or "", metadata={"source": item["url"]}),
-# )
+AZURE_OPENAI_API_VERSION = '2023-05-15'
+EMBEDDING_DEPLOYMENT = 'text-embedding-ada-002'
 # }}}
+
 # {{{ load data
 def load_docs(file_path):
     docs = []
-    with open(file_path, 'r') as jsonl_data:
-        for line in jsonl_data:
+    with open(file_path, 'r', encoding='utf-8') as f:
+        for line in f:
             data = json.loads(line)
-            obj = Document(**data)
-            docs.append(obj)
-
+            docs.append(Document(**data))
     return docs
-
 # }}}
+
+# Load documents
 docs = load_docs('./bob_website_data.jsonl')
 
-# {{{ plot chunks 
+# Check doc lengths
+docs_length = [len(doc.page_content) for doc in docs]
+print(f"doc lengths\nmin: {min(docs_length)} \navg.: {round(np.mean(docs_length), 1)} \nmax: {max(docs_length)}")
 
-docs_length = []
-for i in range(len(docs)):
-    docs_length.append(len(docs[i].page_content))
+# {{{ split into chunks
+def chunk_docs(doc, chunk_size=700, chunk_overlap=150):
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        separators=["\n\n", "\n", " ", ""],
+        length_function=len
+    )
+    return splitter.create_documents([doc.page_content], metadatas=[doc.metadata])
 
-print(f'doc lengths\nmin: {min(docs_length)} \navg.: {round(np.average(docs_length), 1)} \nmax: {max(docs_length)}')
+chunked_docs = [chunk_docs(doc) for doc in docs]
+flattened_chunked_docs = [chunk for sublist in chunked_docs for chunk in sublist]
+# }}}
 
-# plt.figure(figsize=(15, 3))
-# plt.plot(docs_length, marker='o')
-# plt.title("doc length")
-# plt.ylabel("# of characters")
-# plt.show()
-# }}} 
-# {{{ chunk docs 
-
-chunk_size = 700
-chunk_overlap = 150
-
-def chunk_docs(doc, chunk_size, chunk_overlap):
-    text_splitter = RecursiveCharacterTextSplitter(separators=["\n\n", "\n", " ", ""],
-    chunk_size=chunk_size,
-    chunk_overlap=chunk_overlap,
-    length_function=len)
-    chunks = text_splitter.create_documents(texts=[doc.page_content], metadatas=[{'source': doc.metadata['source']}])
-    return chunks
-
-chunked_docs = []
-
-for i in docs:
-    chunked_docs.append(chunk_docs(i, chunk_size=chunk_size, chunk_overlap=chunk_overlap))
-flattened_chunked_docs = [doc for docs in chunked_docs for doc in docs]
-# }}} 
-# {{{ initialize Azure embeddings, vector DB and add data 
-
+# {{{ initialize Azure OpenAI Embeddings
 embeddings = AzureOpenAIEmbeddings(
-    azure_deployment='text-embedding-ada-002',
-    openai_api_version=OPENAI_API_VERSION,
-    azure_endpoint = AZURE_OPENAI_ENDPOINT,
+    azure_deployment=EMBEDDING_DEPLOYMENT,
+    openai_api_version=AZURE_OPENAI_API_VERSION,
+    azure_endpoint=AZURE_OPENAI_ENDPOINT,
     api_key=AZURE_OPENAI_API_KEY
 )
+# }}}
 
-index_name = 'bob-data-langchain-index'
+# {{{ initialize Azure Search vector store
 vector_store = AzureSearch(
     azure_search_endpoint=AZURE_COGNITIVE_SEARCH_ENDPOINT,
     azure_search_key=AZURE_COGNITIVE_SEARCH_API_KEY,
-    index_name=index_name,
-    embedding_function=embeddings.embed_query,
+    index_name=AZURE_COGNITIVE_SEARCH_INDEX_NAME,
+    embedding_function=embeddings.embed_query
 )
 
-# vector_store.add_documents(documents=flattened_chunked_docs)
-# query_docs = vector_store.similarity_search(
-#     query = 'what is the data about',
-#     k=5,
-#     search_type='similarity'
-# )
-# }}} 
-llm = AzureChatOpenAI(deployment_name='gpt-35-turbo', openai_api_key=AZURE_OPENAI_API_KEY, temperature=0.1, api_version = OPENAI_API_VERSION)
-# {{{ initialize prompt and qa chain 
+# Uncomment if you want to upload new documents
+# vector_store.add_documents(flattened_chunked_docs)
+# }}}
 
-prompt_template = """You are an expert financial advisor from Bank of Baroda, assisting users with specific Bank of Baroda products based on their financial data and user profile.
+# {{{ initialize chat model
+llm = AzureChatOpenAI(
+    deployment_name=AZURE_OPENAI_DEPLOYMENT_NAME,
+    openai_api_key=AZURE_OPENAI_API_KEY,
+    api_version=AZURE_OPENAI_API_VERSION,
+    temperature=0.1
+)
+# }}}
+
+# {{{ Prompt & Conversational QA chain
+prompt_template = """
+You are an expert financial advisor from Bank of Baroda, assisting users with specific Bank of Baroda products based on their financial data and user profile.
 Context:
 {context}
 Chat history:
 {chat_history}
 Query: {question}
 """
-prompt = PromptTemplate(template = prompt_template, inputVariables = ["chat_history", "question"])
+prompt = PromptTemplate(template=prompt_template, input_variables=["chat_history", "question"])
 
 qa = ConversationalRetrievalChain.from_llm(
     llm=llm,
     retriever=vector_store.as_retriever(),
-    # condense_question_prompt = PromptTemplate.from_template(prompt_template),
-    combine_docs_chain_kwargs = {"prompt": prompt},
-    return_source_documents = True,
+    combine_docs_chain_kwargs={"prompt": prompt},
+    return_source_documents=True,
     verbose=True
 )
 
 chat_history = []
-# }}} 
+# }}}
 
-def query_vector_db(query):
-    qa_result = qa({
+# {{{ function: query_vector_db
+def query_vector_db(query: str):
+    result = qa({
         "question": query,
-        "chat_history": chat_history,
+        "chat_history": chat_history
     })
 
-    sources = []
-    for i in qa_result['source_documents']:
-        sources.append(i.metadata['source'])
-    
-    qa_result = {'answer': qa_result['answer'], "sources": sources}
-    
-    return qa_result
-
-
-#TODO: increase azure ai search quota to index entire data
+    sources = [doc.metadata.get("source") for doc in result['source_documents']]
+    return {
+        "answer": result['answer'],
+        "sources": sources
+    }
+# }}}

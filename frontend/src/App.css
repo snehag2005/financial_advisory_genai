@@ -1,0 +1,22 @@
+
+.App {
+  font-family: Arial, sans-serif;
+  text-align: center;
+  padding: 2rem;
+}
+
+input[type="file"], input[type="text"] {
+  margin: 1rem 0;
+  padding: 0.5rem;
+}
+
+button {
+  margin-left: 0.5rem;
+  padding: 0.5rem 1rem;
+}
+
+.answer {
+  margin-top: 2rem;
+  border-top: 1px solid #ccc;
+  padding-top: 1rem;
+}

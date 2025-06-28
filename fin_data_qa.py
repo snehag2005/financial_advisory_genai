@@ -130,7 +130,11 @@ qp.add_link("response_synthesis_prompt", "llm2")
 
 net = Network(notebook=True, cdn_resources='in_line', directed=True)
 net.from_nx(qp.dag)
-net.save_graph('query_pipeline_dag.html')
+html_content = net.generate_html()
+with open("query_pipeline_dag.html", "w", encoding="utf-8") as f:
+    f.write(html_content)
+
+
 # }}} 
 # {{{ run pipeline
 
